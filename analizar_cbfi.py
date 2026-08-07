@@ -232,6 +232,8 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
     except Exception:
         balance = None
 
+    activos = deuda = capital = None
+
     if balance is not None and not getattr(balance, "empty", True):
         try:
             datos.fecha_balance = str(balance.columns[0].date())
@@ -248,35 +250,43 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
         deuda = _fila_balance(balance, "Total Debt")
         if not deuda:
             largo = _fila_balance(balance, "Long Term Debt And Capital Lease Obligation",
-                                  "Long Term Debt") or 0
+                                  "Long Term Debt", "Long Term Debt And Capital Lease") or 0
             corto = _fila_balance(balance, "Current Debt And Capital Lease Obligation",
-                                  "Current Debt", "Short Long Term Debt") or 0
+                                  "Current Debt", "Short Long Term Debt",
+                                  "Other Current Borrowings") or 0
             deuda = (largo + corto) or None
             if deuda:
                 datos.avisos.append("deuda sumada de tramo largo + corto")
 
-        if deuda and activos:
-            ltv = deuda / activos
-            # Una FIBRA sin deuda practicamente no existe, y arriba de 70%
-            # habria roto el limite de la CNBV. Fuera de ese rango lo que
-            # falla es la lectura del balance, no la FIBRA: se descarta el
-            # dato en vez de calificarla con el.
-            if 0.05 <= ltv <= 0.70:
-                datos.ltv = ltv
-                # La FIBRA reporta LTV contra el valor de sus propiedades,
-                # que es menor que el activo total: esta estimacion tira bajo.
-                datos.avisos.append("LTV estimado sobre activos totales")
-            else:
-                datos.avisos.append(
-                    f"LTV descartado por implausible ({ltv*100:.1f}%): "
-                    f"revisa con --diagnostico")
+    # info trae totalDebt agregado aun cuando el balance detallado viene
+    # incompleto, que es el caso de varias emisoras de la BMV.
+    if not deuda:
+        deuda = _numero(info.get("totalDebt"))
+        if deuda:
+            datos.avisos.append("deuda tomada de info.totalDebt")
 
-        if not datos.nav_por_cbfi and capital:
-            acciones = _numero(info.get("sharesOutstanding"))
-            if acciones:
-                datos.nav_por_cbfi = capital / acciones
-                if datos.precio:
-                    datos.p_nav = datos.precio / datos.nav_por_cbfi
+    if deuda and activos:
+        ltv = deuda / activos
+        # Una FIBRA sin deuda practicamente no existe, y arriba de 70% habria
+        # roto el limite de la CNBV. Fuera de ese rango lo que falla es la
+        # lectura del balance, no la FIBRA: se descarta el dato en vez de
+        # calificarla con el.
+        if 0.05 <= ltv <= 0.70:
+            datos.ltv = ltv
+            # La FIBRA reporta LTV contra el valor de sus propiedades, que es
+            # menor que el activo total: esta estimacion tira bajo.
+            datos.avisos.append("LTV estimado sobre activos totales")
+        else:
+            datos.avisos.append(
+                f"LTV descartado por implausible ({ltv*100:.1f}%): "
+                f"revisa con --diagnostico")
+
+    if not datos.nav_por_cbfi and capital:
+        acciones = _numero(info.get("sharesOutstanding"))
+        if acciones:
+            datos.nav_por_cbfi = capital / acciones
+            if datos.precio:
+                datos.p_nav = datos.precio / datos.nav_por_cbfi
 
     # FFO: se usa el flujo operativo por CBFI como proxy. El FFO formal parte
     # de la utilidad neta y le resta la revaluacion de inmuebles, que es el
@@ -293,7 +303,17 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
             factor = 1
 
         operativo = _fila_balance(flujo, "Operating Cash Flow",
-                                  "Total Cash From Operating Activities")
+                                  "Total Cash From Operating Activities",
+                                  "Cash Flow From Continuing Operating Activities")
+
+        # Mismo caso que la deuda: info trae el flujo operativo agregado (ya
+        # anualizado) cuando el estado detallado viene vacio.
+        if not operativo:
+            operativo = _numero(info.get("operatingCashflow"))
+            if operativo:
+                factor = 1
+                datos.avisos.append("flujo operativo tomado de info")
+
         acciones = _numero(info.get("sharesOutstanding"))
         if operativo and acciones:
             datos.ffo_por_cbfi_anual = (operativo * factor) / acciones
