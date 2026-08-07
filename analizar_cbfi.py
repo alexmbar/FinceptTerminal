@@ -545,45 +545,95 @@ CAMPOS_JSON = ["yield_exigido", "affo_por_cbfi_anual", "ffo_por_cbfi_anual",
                "distribucion_anual"]
 
 
+# Tasa exigida inicial por tipo de portafolio. Es un PUNTO DE PARTIDA, no una
+# recomendacion: un hotel no merece la misma tasa que una nave industrial con
+# contratos largos, y arrancar todo en 10% trataria igual a los dos. Ajustalo
+# a tu lectura de CETES/TIIE y del riesgo de cada emisor.
+YIELD_EXIGIDO_POR_SECTOR = {
+    "Industrial":   0.100,   # contratos largos, demanda de nearshoring
+    "Diversificada": 0.100,  # riesgo repartido entre tipos de inmueble
+    "Comercial":    0.105,   # sensible al consumo
+    "Self-storage": 0.105,
+    "Educativo":    0.105,   # contratos largos pero un solo tipo de inquilino
+    "Energia":      0.100,   # flujo regulado
+    "Hipotecario":  0.110,   # riesgo de credito, no de ladrillo
+    "Hotelero":     0.120,   # el mas ciclico: ocupacion se mueve con la economia
+    "Desarrollo":   0.130,   # aun sin flujo estabilizado
+}
+
+
+def _yield_inicial(sector: str) -> float:
+    for clave, tasa in YIELD_EXIGIDO_POR_SECTOR.items():
+        if sector.lower().startswith(clave.lower()):
+            return tasa
+    return 0.110   # sector sin confirmar: se exige un poco mas
+
+
+def entrada_vacia(ticker: str) -> dict:
+    _, sector = CATALOGO.get(ticker, ("", ""))
+    return {
+        "_sector": sector,
+        "yield_exigido": _yield_inicial(sector),
+        "affo_por_cbfi_anual": None,
+        "ffo_por_cbfi_anual": None,
+        "nav_por_cbfi": None,
+        "ltv": None,
+        "ocupacion": None,
+    }
+
+
 def plantilla_json() -> dict:
     return {
         "_ayuda": {
             "de_donde": "Reporte trimestral de cada FIBRA (relacion con inversionistas).",
+            "que_llenar": "Solo AFFO y ocupacion: NAV, LTV y FFO se derivan solos.",
             "yield_exigido": "Tu tasa exigida: CETES/TIIE 1 año + spread. 0.10 = 10%",
-            "affo_por_cbfi_anual": "AFFO anual por CBFI, en pesos.",
-            "nav_por_cbfi": "Valor de los inmuebles por CBFI, en pesos.",
-            "ltv": "Apalancamiento. 0.259 = 25.9%",
-            "ocupacion": "0.96 = 96%",
-            "precio_cbfi": "Solo si corres --sin-red; normalmente se descarga.",
-            "nota": "Deja en null lo que no tengas: el criterio se omite.",
+            "affo_por_cbfi_anual": "AFFO anual por CBFI, en pesos. Sin el, el payout se mide contra FFO (vara mas laxa).",
+            "nav_por_cbfi": "Solo si quieres pisar el estimado con la cifra oficial.",
+            "ltv": "Apalancamiento oficial. 0.259 = 25.9%",
+            "ocupacion": "0.96 = 96%. No hay forma de derivarlo.",
+            "nota": "Deja en null lo que no tengas: el criterio se omite, no cuenta como fallo.",
         },
-        "fibras": {
-            "FUNO11": {"yield_exigido": 0.10, "affo_por_cbfi_anual": None,
-                       "ffo_por_cbfi_anual": None, "nav_por_cbfi": None,
-                       "ltv": None, "ocupacion": None},
-            "FMTY14": {"yield_exigido": 0.10, "affo_por_cbfi_anual": None,
-                       "ffo_por_cbfi_anual": None, "nav_por_cbfi": None,
-                       "ltv": None, "ocupacion": None},
-        },
+        "fibras": {t: entrada_vacia(t) for t in CATALOGO},
     }
 
 
 def cargar_fundamentales() -> dict:
     ruta = directorio_datos() / ARCHIVO_FUNDAMENTALES
+
     if not ruta.exists():
-        ruta.write_text(json.dumps(plantilla_json(), indent=2, ensure_ascii=False),
+        contenido = plantilla_json()
+        ruta.write_text(json.dumps(contenido, indent=2, ensure_ascii=False),
                         encoding="utf-8")
-        print(f"\n  Se creo {ruta.name} con una plantilla.")
-        print("  Llenalo con el reporte trimestral para activar los criterios")
-        print("  de sostenibilidad, valuacion y riesgo.\n")
-        return plantilla_json()["fibras"]
+        print(f"\n  Se creo {ruta.name} con las {len(CATALOGO)} FIBRAs de la BMV.")
+        print("  NAV, LTV y FFO se descargan solos; captura AFFO y ocupacion")
+        print("  del reporte trimestral cuando quieras afinar el analisis.\n")
+        return contenido["fibras"]
 
     try:
-        return json.loads(ruta.read_text(encoding="utf-8")).get("fibras", {})
+        contenido = json.loads(ruta.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         print(f"\n  {ruta.name} tiene un error de sintaxis JSON: {e}")
         print("  Se ignora; corrigelo o borralo para regenerarlo.\n")
         return {}
+
+    fibras = contenido.get("fibras", {})
+
+    # Completar con las FIBRAs del catalogo que falten, sin tocar las que ya
+    # estan: lo capturado a mano no se pisa ni se reordena.
+    faltantes = [t for t in CATALOGO if t not in fibras]
+    if faltantes:
+        for ticker in faltantes:
+            fibras[ticker] = entrada_vacia(ticker)
+        contenido["fibras"] = fibras
+        contenido.setdefault("_ayuda", plantilla_json()["_ayuda"])
+        ruta.write_text(json.dumps(contenido, indent=2, ensure_ascii=False),
+                        encoding="utf-8")
+        print(f"\n  Se agregaron {len(faltantes)} FIBRAs que faltaban en {ruta.name}:")
+        print(f"  {', '.join(faltantes)}")
+        print("  Lo que ya tenias capturado quedo intacto.\n")
+
+    return fibras
 
 
 # ---------------------------------------------------------------------------
@@ -648,27 +698,46 @@ def main():
     if desconocidos:
         print(f"\n  Aviso: no estan en el catalogo de la BMV: {', '.join(desconocidos)}")
 
+    if not sin_red and len(tickers) > 4:
+        print(f"\n  Descargando {len(tickers)} FIBRAs de Yahoo. Toma un par de minutos.\n")
+
     fibras = []
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers, 1):
         datos = fundamentales.get(ticker, {})
         fibra = FIBRA(ticker=ticker,
                       **{k: datos.get(k) for k in CAMPOS_JSON if datos.get(k) is not None})
 
         if not sin_red:
-            print(f"  Descargando {ticker}...", end="\r")
+            print(f"  [{i}/{len(tickers)}] {ticker}...".ljust(50), end="\r")
             mercado = descargar(ticker)
             fibra.mercado = mercado
             if mercado.ok:
                 fibra.completar_con(mercado)
-            print(" " * 40, end="\r")
 
         fibras.append(fibra)
 
-    for fibra in fibras:
-        AnalizadorFIBRA(fibra).mostrar()
+    if not sin_red:
+        print(" " * 50, end="\r")
+
+    # Con muchas FIBRAs el detalle son cientos de lineas y la tabla es lo que
+    # se lee. El detalle sigue disponible por ticker o con --detalle.
+    detalle = "--detalle" in sys.argv[1:] or len(fibras) <= 4
+
+    if detalle:
+        for fibra in fibras:
+            AnalizadorFIBRA(fibra).mostrar()
 
     if len(fibras) > 1:
         tabla_comparativa(fibras)
+        if not detalle:
+            print(f"\n  Detalle de una: python analizar_cbfi.py FUNO11")
+            print(f"  Detalle de todas: agrega --detalle")
+
+    sin_datos = [f.ticker for f in fibras
+                 if AnalizadorFIBRA(f).evaluar()["total"] == 0]
+    if sin_datos:
+        print(f"\n  Sin datos suficientes ({len(sin_datos)}): {', '.join(sin_datos)}")
+        print("  Puede ser que Yahoo no cubra ese ticker o que no haya red.")
 
     print("\n" + "=" * 72)
     print("COMO LEER ESTO")
