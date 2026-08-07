@@ -179,3 +179,7 @@ fincept-qt/docs/CRYPTO_WALLET_CONNECT.md
 *.md
 !README.md
 !**/README.md
+
+
+dist/
+build/
