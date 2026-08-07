@@ -36,7 +36,7 @@ Requiere: pip install yfinance
 import json
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -103,6 +103,7 @@ class DatosMercado:
     ltv: Optional[float] = None
     ffo_por_cbfi_anual: Optional[float] = None
     fecha_balance: Optional[str] = None
+    balance_obsoleto: bool = False
 
     error: Optional[str] = None
     avisos: list = field(default_factory=list)
@@ -203,6 +204,53 @@ def _fila_balance(df, *alias) -> Optional[float]:
     return None
 
 
+def _cbfis_en_circulacion(info: dict, balance) -> Optional[float]:
+    """
+    Numero de CBFIs, que es el divisor de casi todo lo derivado.
+
+    info.sharesOutstanding llega en 0 o ausente para varias emisoras de la BMV
+    (FMTY14 devuelve 0, FSHOP13 None). El balance si trae el dato, y sin el no
+    hay FFO ni NAV por CBFI.
+    """
+    acciones = _numero(info.get("sharesOutstanding"))
+    if acciones:
+        return acciones
+    return _fila_balance(balance, "Ordinary Shares Number", "Share Issued")
+
+
+def _factor_moneda(info: dict) -> tuple:
+    """
+    Cuanto multiplicar los estados financieros para llevarlos a la moneda del
+    precio, y la nota que lo explica.
+
+    Fibra Prologis reporta en USD y cotiza en MXN. Dividir un flujo en dolares
+    entre CBFIs y compararlo contra distribuciones en pesos inflaba su payout
+    unas diecisiete veces: salia 1103% donde el real ronda 64%.
+    """
+    moneda_precio = (info.get("currency") or "").upper()
+    moneda_estados = (info.get("financialCurrency") or "").upper()
+
+    if not moneda_precio or not moneda_estados or moneda_precio == moneda_estados:
+        return 1.0, None
+
+    try:
+        import yfinance as yf
+        par = yf.Ticker(f"{moneda_estados}{moneda_precio}=X")
+        tipo = _numero(par.fast_info.get("lastPrice"))
+        if not tipo:
+            hist = par.history(period="5d")
+            tipo = float(hist["Close"].dropna().iloc[-1]) if not hist.empty else None
+    except Exception:
+        tipo = None
+
+    if not tipo:
+        # Sin tipo de cambio es preferible no derivar a derivar en la moneda
+        # equivocada: un payout de 1103% se lee como señal, no como error.
+        return None, f"estados en {moneda_estados} y precio en {moneda_precio}, sin tipo de cambio"
+
+    return tipo, f"estados en {moneda_estados} convertidos a {moneda_precio} a {tipo:.2f}"
+
+
 def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
     """
     Estima NAV/CBFI, P/NAV, LTV y FFO desde los estados financieros.
@@ -236,7 +284,18 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
 
     if balance is not None and not getattr(balance, "empty", True):
         try:
-            datos.fecha_balance = str(balance.columns[0].date())
+            fecha = balance.columns[0].date()
+            datos.fecha_balance = str(fecha)
+            # Yahoo cae al balance anual cuando no tiene el trimestral, y para
+            # algunas emisoras el ultimo anual es de hace años (FMTY14 devuelve
+            # 2023). Todo lo derivado de ahi describe una FIBRA que ya no es la
+            # que cotiza hoy, y sin este aviso se lee como dato al dia.
+            meses = (date.today() - fecha).days / 30.44
+            if meses > 15:
+                datos.balance_obsoleto = True
+                datos.avisos.append(
+                    f"BALANCE DE HACE {meses/12:.1f} ANOS ({fecha}): "
+                    f"lo derivado de el esta desactualizado")
         except Exception:
             pass
 
@@ -265,6 +324,16 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
         if deuda:
             datos.avisos.append("deuda tomada de info.totalDebt")
 
+    # El renglon de deuda del balance puede quedar corto frente al agregado de
+    # info: FMTY14 da 3.3% desde el balance y 24.4% con info.totalDebt, contra
+    # 25.9% que reporta la FIBRA. Cuando el balance produce un LTV imposible se
+    # reintenta con el agregado antes de rendirse.
+    if deuda and activos and not (0.05 <= deuda / activos <= 0.70):
+        alterna = _numero(info.get("totalDebt"))
+        if alterna and 0.05 <= alterna / activos <= 0.70:
+            deuda = alterna
+            datos.avisos.append("deuda del balance descartada, se uso info.totalDebt")
+
     if deuda and activos:
         ltv = deuda / activos
         # Una FIBRA sin deuda practicamente no existe, y arriba de 70% habria
@@ -281,12 +350,15 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
                 f"LTV descartado por implausible ({ltv*100:.1f}%): "
                 f"revisa con --diagnostico")
 
-    if not datos.nav_por_cbfi and capital:
-        acciones = _numero(info.get("sharesOutstanding"))
-        if acciones:
-            datos.nav_por_cbfi = capital / acciones
-            if datos.precio:
-                datos.p_nav = datos.precio / datos.nav_por_cbfi
+    acciones = _cbfis_en_circulacion(info, balance)
+    cambio, nota_moneda = _factor_moneda(info)
+    if nota_moneda:
+        datos.avisos.append(nota_moneda)
+
+    if not datos.nav_por_cbfi and capital and acciones and cambio:
+        datos.nav_por_cbfi = (capital * cambio) / acciones
+        if datos.precio:
+            datos.p_nav = datos.precio / datos.nav_por_cbfi
 
     # FFO: se usa el flujo operativo por CBFI como proxy. El FFO formal parte
     # de la utilidad neta y le resta la revaluacion de inmuebles, que es el
@@ -314,8 +386,8 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
                 factor = 1
                 datos.avisos.append("flujo operativo tomado de info")
 
-        acciones = _numero(info.get("sharesOutstanding"))
-        if operativo and acciones:
+        if operativo and acciones and cambio:
+            operativo *= cambio
             datos.ffo_por_cbfi_anual = (operativo * factor) / acciones
             datos.avisos.append("FFO aproximado con flujo operativo")
     except Exception:
@@ -504,6 +576,16 @@ class AnalizadorFIBRA:
             elif payout > 1.10:
                 recomendacion = "EVITAR (payout insostenible)"
 
+        # Un balance de hace años describe una FIBRA que ya no es la que
+        # cotiza. Condenarla con eso es peor que no opinar: FMTY14 salia
+        # EVITAR por un flujo operativo de 2023. Lo que viene del JSON si
+        # vale, porque lo capturaste del reporte al dia.
+        if self.f.mercado.balance_obsoleto:
+            derivados = {"ltv", "nav_por_cbfi", "ffo_por_cbfi_anual"}
+            if any(self.f.procedencia.get(c) == "auto" for c in derivados):
+                fecha = self.f.mercado.fecha_balance or "?"
+                recomendacion = f"DATOS OBSOLETOS (balance {fecha})"
+
         return {
             "yield": y, "payout_affo": payout, "p_ffo": self.p_ffo(),
             "p_nav": pnav, "criterios": criterios, "cumplidos": cumplidos,
@@ -516,7 +598,7 @@ class AnalizadorFIBRA:
         m = f.mercado
 
         print("\n" + "=" * 72)
-        print(f"  {f.ticker} — {f.nombre}")
+        print(f"  {f.ticker} - {f.nombre}")
         print(f"  {f.sector}")
         print("=" * 72)
 
@@ -545,12 +627,14 @@ class AnalizadorFIBRA:
         linea("Distribution yield", f"{r['yield']*100:.2f}%" if r["yield"] else "sin dato")
         linea("Tu tasa exigida", f"{f.yield_exigido*100:.2f}%")
 
-        etiqueta_balance = f" — balance al {m.fecha_balance}" if m.fecha_balance else ""
+        etiqueta_balance = f" - balance al {m.fecha_balance}" if m.fecha_balance else ""
         print(f"\nVALUACION Y SOSTENIBILIDAD{etiqueta_balance}")
 
         _, base_nombre = AnalizadorFIBRA(f).base_payout()
         if r["payout_affo"] is not None:
-            nota = "sostenible" if r["payout_affo"] <= 1.0 else "REPARTE DE MAS"
+            nota = ("FLUJO NEGATIVO" if r["payout_affo"] < 0
+                    else "sostenible" if r["payout_affo"] <= 1.0
+                    else "REPARTE DE MAS")
             linea(f"Payout sobre {base_nombre}", f"{r['payout_affo']*100:.1f}%", f"({nota})")
         else:
             linea("Payout sobre AFFO/FFO", "sin dato")
@@ -836,7 +920,7 @@ def main():
     args = [a for a in args if not a.startswith("--")]
 
     print("\n" + "=" * 72)
-    print("  ANALIZADOR DE CBFIs (FIBRAs) — BMV / GBM")
+    print("  ANALIZADOR DE CBFIs (FIBRAs) - BMV / GBM")
     print(f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     print("=" * 72)
 
