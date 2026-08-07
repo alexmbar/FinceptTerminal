@@ -43,13 +43,13 @@ def check_python():
 def check_yfinance():
     """yfinance se necesita en tiempo de build para que PyInstaller lo empaque."""
     try:
-        import yfinance  # noqa: F401
+        import yfinance, pypdf  # noqa: F401
         return
     except ImportError:
         pass
 
     print("  yfinance no disponible. Instalando...")
-    if subprocess.run([sys.executable, "-m", "pip", "install", "yfinance"]).returncode != 0:
+    if subprocess.run([sys.executable, "-m", "pip", "install", "yfinance", "pypdf"]).returncode != 0:
         die("No se pudo instalar yfinance")
     try:
         import yfinance  # noqa: F401
@@ -111,6 +111,8 @@ def build():
         # truena al intentar descargar precios.
         "--collect-all", "yfinance",
         "--collect-all", "curl_cffi",
+        "--hidden-import", "pypdf",
+        "--hidden-import", "extraer_reportes",
         "--distpath", "dist",
         # --workpath, NO --buildpath: esa opcion no existe en PyInstaller.
         "--workpath", "build",

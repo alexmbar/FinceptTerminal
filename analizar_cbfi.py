@@ -852,6 +852,23 @@ def main():
         guardar_campos(args[0].upper(), args[1:])
         return
 
+    if "--extraer" in sys.argv[1:]:
+        # Import perezoso: solo esta ruta necesita pypdf.
+        try:
+            import extraer_reportes
+        except ImportError:
+            print("\n  Falta extraer_reportes.py junto al programa.\n")
+            return
+        objetivos = ([t.upper() for t in args] if args
+                     else (list(CATALOGO) if "--todas" in sys.argv else []))
+        if not objetivos:
+            print("\n  Uso:  analizar_cbfi.py --extraer FMTY14 [--verbose]")
+            print("        analizar_cbfi.py --extraer --todas\n")
+            return
+        for ticker in objetivos:
+            extraer_reportes.procesar(ticker, verbose="--verbose" in sys.argv)
+        return
+
     if "--diagnostico" in sys.argv[1:]:
         if not args:
             print("\n  Indica un ticker:  analizar_cbfi.py --diagnostico FMTY14\n")
