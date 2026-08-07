@@ -1,189 +1,161 @@
 #!/usr/bin/env python3
 """
-Build script para compilar AnalizadorCBFI.exe
-Alternativa a build.bat si tienes problemas con el batch script
+Compila AnalizadorCBFI.exe con PyInstaller.
+
+Alternativa multiplataforma a build.bat. Invoca PyInstaller como
+`python -m PyInstaller` para no depender de que pyinstaller.exe
+este en el PATH (problema comun en Windows).
+
+Uso:
+    python build_exe.py
 """
 
 import os
-import sys
-import subprocess
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
-
-def print_header(text):
-    """Imprime un encabezado formateado"""
-    print("\n" + "=" * 70)
-    print(f"  {text}")
-    print("=" * 70 + "\n")
+APP_NAME = "AnalizadorCBFI"
+ENTRY_POINT = "analizar_cbfi.py"
 
 
-def print_step(number, text):
-    """Imprime un paso numerado"""
+def step(number, text):
     print(f"[{number}/4] {text}...")
 
 
-def print_success(text):
-    """Imprime un mensaje de éxito"""
-    print(f"  ✓ {text}\n")
+def ok(text):
+    print(f"  OK - {text}\n")
 
 
-def print_error(text, exit_code=1):
-    """Imprime un error y sale"""
-    print(f"\n  ✗ ERROR: {text}\n")
-    sys.exit(exit_code)
+def die(text):
+    print(f"\n  ERROR: {text}\n")
+    sys.exit(1)
 
 
 def check_python():
-    """Verifica que Python esté disponible"""
-    print_step(1, "Verificando Python")
-
+    step(1, "Verificando Python")
     if sys.version_info < (3, 7):
-        print_error(f"Python {sys.version} es muy viejo. Necesitas Python 3.7+")
+        die(f"Python {sys.version.split()[0]} es muy viejo. Necesitas 3.7+")
+    ok(f"Python {sys.version.split()[0]}")
 
-    print_success(f"Python {sys.version.split()[0]} encontrado")
+
+def check_yfinance():
+    """yfinance se necesita en tiempo de build para que PyInstaller lo empaque."""
+    try:
+        import yfinance  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    print("  yfinance no disponible. Instalando...")
+    if subprocess.run([sys.executable, "-m", "pip", "install", "yfinance"]).returncode != 0:
+        die("No se pudo instalar yfinance")
+    try:
+        import yfinance  # noqa: F401
+    except ImportError:
+        die("yfinance se instalo pero no se puede importar")
 
 
 def check_pyinstaller():
-    """Verifica que PyInstaller esté instalado"""
-    print_step(2, "Verificando PyInstaller")
+    step(2, "Verificando PyInstaller")
 
-    try:
-        import PyInstaller
-        print_success("PyInstaller encontrado")
-    except ImportError:
-        print("  ⚠ PyInstaller no está instalado. Instalando...")
+    def version():
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "pyinstaller"],
+            [sys.executable, "-m", "PyInstaller", "--version"],
             capture_output=True,
-            text=True
+            text=True,
         )
+        return result.stdout.strip() if result.returncode == 0 else None
 
+    installed = version()
+    if installed is None:
+        print("  PyInstaller no disponible. Instalando...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "pyinstaller"]
+        )
         if result.returncode != 0:
-            print_error("No se pudo instalar PyInstaller")
+            die("No se pudo instalar PyInstaller")
+        installed = version()
+        if installed is None:
+            die("PyInstaller se instalo pero no se puede invocar")
 
-        print_success("PyInstaller instalado")
-
-
-def clean_build():
-    """Limpia builds anteriores"""
-    print_step(3, "Limpiando builds anteriores")
-
-    dirs_to_remove = ['build', 'dist']
-    files_to_remove = ['AnalizadorCBFI.spec']
-
-    for dir_name in dirs_to_remove:
-        if os.path.exists(dir_name):
-            shutil.rmtree(dir_name)
-            print(f"  • Eliminado: {dir_name}/")
-
-    for file_name in files_to_remove:
-        if os.path.exists(file_name):
-            os.remove(file_name)
-            print(f"  • Eliminado: {file_name}")
-
-    print_success("Directorio limpio")
+    ok(f"PyInstaller {installed}")
+    print("  Verificando yfinance (descarga de precios)...")
+    check_yfinance()
+    ok("yfinance disponible")
 
 
-def build_exe():
-    """Compila el ejecutable con PyInstaller"""
-    print_step(4, "Compilando AnalizadorCBFI.exe")
-    print("  (Esto puede tardar 30-60 segundos...)\n")
+def clean():
+    step(3, "Limpiando builds anteriores")
+    for directory in ("build", "dist"):
+        if os.path.isdir(directory):
+            shutil.rmtree(directory)
+            print(f"  - eliminado {directory}/")
+    ok("Directorio limpio")
 
-    # Parámetros de compilación
+
+def build():
+    step(4, f"Compilando {APP_NAME}")
+    print("  (30-60 segundos, paciencia)\n")
+
     args = [
         sys.executable,
         "-m",
         "PyInstaller",
-        "--name=AnalizadorCBFI",
+        "--name", APP_NAME,
         "--onefile",
         "--console",
-        "--distpath=dist",
-        "--buildpath=build",
-        "--specpath=.",
-        "analizar_cbfi.py"
+        # yfinance carga modulos en runtime que el analisis estatico no ve, y
+        # curl_cffi trae binarios nativos. Sin esto el .exe compila pero
+        # truena al intentar descargar precios.
+        "--collect-all", "yfinance",
+        "--collect-all", "curl_cffi",
+        "--distpath", "dist",
+        # --workpath, NO --buildpath: esa opcion no existe en PyInstaller.
+        "--workpath", "build",
+        "--specpath", "build",
+        "--noconfirm",
+        ENTRY_POINT,
     ]
 
-    # Ejecutar PyInstaller
-    result = subprocess.run(args, capture_output=True, text=True)
-
+    # Sin capture_output: el log de PyInstaller se ve en vivo, que es
+    # justo lo que hace falta cuando algo falla.
+    result = subprocess.run(args)
     if result.returncode != 0:
-        print(f"  STDOUT:\n{result.stdout}")
-        print(f"  STDERR:\n{result.stderr}")
-        print_error("La compilación falló")
+        die("La compilacion fallo. Revisa el log de arriba.")
 
-    # Verificar que el exe se generó
-    exe_path = Path("dist") / "AnalizadorCBFI.exe"
-    if not exe_path.exists():
-        print_error("No se generó el archivo .exe")
+    exe = Path("dist") / (APP_NAME + (".exe" if os.name == "nt" else ""))
+    if not exe.exists():
+        die("PyInstaller termino sin error pero no genero el ejecutable")
 
-    file_size_mb = exe_path.stat().st_size / (1024 * 1024)
-    print_success(f"AnalizadorCBFI.exe generado ({file_size_mb:.1f} MB)")
-
-
-def show_success_message():
-    """Muestra mensaje de éxito final"""
-    print_header("✓ COMPILACIÓN EXITOSA")
-
-    exe_path = Path("dist") / "AnalizadorCBFI.exe"
-
-    print("📦 Archivo generado:")
-    print(f"   {exe_path.resolve()}\n")
-
-    print("📋 Lo que puedes hacer ahora:\n")
-    print("   1. EJECUTAR desde PowerShell:")
-    print("      .\\dist\\AnalizadorCBFI.exe\n")
-    print("   2. HACER CLIC DIRECTO:")
-    print("      dist\\AnalizadorCBFI.exe\n")
-    print("   3. CREAR ACCESO DIRECTO:")
-    print("      Clic derecho → Enviar a → Escritorio\n")
-    print("   4. COMPARTIR:")
-    print("      El archivo es portable (no necesita Python)\n")
-
-    print("📂 Carpetas generadas:")
-    print("   dist/        → Tu ejecutable (.exe)")
-    print("   build/       → Archivos temporales")
-    print("   *.spec       → Configuración de PyInstaller\n")
-
-    print("🎯 Tips:")
-    print("   • Copia dist\\AnalizadorCBFI.exe a cualquier lugar")
-    print("   • Funciona sin necesidad de Python instalado")
-    print("   • Tamaño típico: 40-60 MB")
-    print("   • Algunos antivirus pueden alertar (es normal)\n")
+    ok(f"{exe.name} generado ({exe.stat().st_size / (1024 * 1024):.1f} MB)")
+    return exe
 
 
 def main():
-    """Función principal"""
+    print(f"\n{'=' * 68}\n   COMPILADOR DE {APP_NAME}\n{'=' * 68}\n")
 
-    print("""
-╔════════════════════════════════════════════════════════════════════╗
-║         COMPILADOR DE ANALIZADOR CBFI v1.0                        ║
-║            Genera AnalizadorCBFI.exe para Windows                  ║
-╚════════════════════════════════════════════════════════════════════╝
-    """)
-
-    # Verificar que analizar_cbfi.py existe
-    if not os.path.exists("analizar_cbfi.py"):
-        print_error(
-            "No se encontró analizar_cbfi.py\n"
-            "Asegúrate de estar en la carpeta correcta"
+    if not os.path.exists(ENTRY_POINT):
+        die(
+            f"No se encontro {ENTRY_POINT}.\n"
+            f"  Ejecuta este script desde la carpeta del proyecto."
         )
 
     try:
-        # Ejecutar pasos
         check_python()
         check_pyinstaller()
-        clean_build()
-        build_exe()
-
-        # Mostrar resultado
-        show_success_message()
-
+        clean()
+        exe = build()
     except KeyboardInterrupt:
-        print("\n\n❌ Compilación cancelada por el usuario")
+        print("\n\nCompilacion cancelada.")
         sys.exit(1)
-    except Exception as e:
-        print_error(f"Error inesperado: {e}")
+
+    print(f"{'=' * 68}\n   COMPILACION EXITOSA\n{'=' * 68}\n")
+    print(f"  Archivo: {exe.resolve()}\n")
+    print("  Para ejecutarlo:")
+    print(f"     .{os.sep}{exe}\n")
+    print("  Es portable: no necesita Python instalado.\n")
 
 
 if __name__ == "__main__":

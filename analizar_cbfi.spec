@@ -1,8 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec file for CBFI Analyzer
-# Genera un ejecutable standalone (.exe) para Windows
-
-block_cipher = None
+#
+# Spec de PyInstaller para AnalizadorCBFI (modo onefile).
+# Probado contra PyInstaller 6.x, que es lo que instala `pip install pyinstaller` hoy.
+#
+# Uso:
+#     python -m PyInstaller analizar_cbfi.spec
+#
+# Normalmente NO hace falta usar este archivo: build.bat y build_exe.py
+# generan su propio spec. Esto es para cuando quieras personalizar el build
+# (icono, datos embebidos, hiddenimports).
 
 a = Analysis(
     ['analizar_cbfi.py'],
@@ -13,20 +19,18 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludedimports=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
+    excludes=[],
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
+# onefile: todo va dentro del EXE, por eso no hay COLLECT.
+# (Un COLLECT aqui produciria ademas una carpeta suelta que contradice el onefile.)
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
-    a.zipfiles,
     a.datas,
     [],
     name='AnalizadorCBFI',
@@ -38,19 +42,9 @@ exe = EXE(
     runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
+    argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='AnalizadorCBFI',
+    icon=None,  # p.ej. 'fincept_icon.ico'
 )
