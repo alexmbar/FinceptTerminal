@@ -239,18 +239,37 @@ def _derivar_fundamentales(tk, datos: DatosMercado) -> None:
             pass
 
         activos = _fila_balance(balance, "Total Assets")
-        deuda = _fila_balance(balance, "Total Debt",
-                              "Long Term Debt And Capital Lease Obligation",
-                              "Long Term Debt")
         capital = _fila_balance(balance, "Stockholders Equity",
                                 "Total Equity Gross Minority Interest")
 
-        # LTV contra activos totales. La FIBRA lo reporta contra el valor de
-        # sus propiedades, que es un poco menor, asi que esta estimacion tira
-        # bajo: un LTV limpio aqui puede estar apretado en el reporte oficial.
+        # "Total Debt" no siempre viene. Cuando falta hay que sumar el tramo
+        # largo y el corto: quedarse solo con uno subestima el apalancamiento
+        # de forma grosera (produce LTV de 1-3% en FIBRAs que reportan 25%+).
+        deuda = _fila_balance(balance, "Total Debt")
+        if not deuda:
+            largo = _fila_balance(balance, "Long Term Debt And Capital Lease Obligation",
+                                  "Long Term Debt") or 0
+            corto = _fila_balance(balance, "Current Debt And Capital Lease Obligation",
+                                  "Current Debt", "Short Long Term Debt") or 0
+            deuda = (largo + corto) or None
+            if deuda:
+                datos.avisos.append("deuda sumada de tramo largo + corto")
+
         if deuda and activos:
-            datos.ltv = deuda / activos
-            datos.avisos.append("LTV estimado sobre activos totales")
+            ltv = deuda / activos
+            # Una FIBRA sin deuda practicamente no existe, y arriba de 70%
+            # habria roto el limite de la CNBV. Fuera de ese rango lo que
+            # falla es la lectura del balance, no la FIBRA: se descarta el
+            # dato en vez de calificarla con el.
+            if 0.05 <= ltv <= 0.70:
+                datos.ltv = ltv
+                # La FIBRA reporta LTV contra el valor de sus propiedades,
+                # que es menor que el activo total: esta estimacion tira bajo.
+                datos.avisos.append("LTV estimado sobre activos totales")
+            else:
+                datos.avisos.append(
+                    f"LTV descartado por implausible ({ltv*100:.1f}%): "
+                    f"revisa con --diagnostico")
 
         if not datos.nav_por_cbfi and capital:
             acciones = _numero(info.get("sharesOutstanding"))
@@ -419,7 +438,12 @@ class AnalizadorFIBRA:
         payout = self.payout_affo()
         _, base_nombre = self.base_payout()
         if payout is not None:
-            criterios[f"Distribucion sostenible (payout <= 100% {base_nombre})"] = payout <= 1.0
+            # El payout negativo sale de un FFO/AFFO negativo: la FIBRA no
+            # genera flujo y reparte de todos modos. Es la peor lectura
+            # posible, no una que "cumple" por ser menor a 100%.
+            criterios[f"Distribucion sostenible (payout <= 100% {base_nombre})"] = (
+                0 < payout <= 1.0
+            )
 
         pnav = self.p_nav()
         if pnav is not None:
@@ -434,8 +458,15 @@ class AnalizadorFIBRA:
         cumplidos = sum(criterios.values())
         total = len(criterios)
 
+        # Se exigen al menos 3 de los 5 criterios para emitir veredicto. Con
+        # dos datos sueltos la proporcion da 100% facil, y "COMPRAR" apoyado
+        # en dos criterios no es una conclusion, es un artefacto del hueco.
+        MINIMO_CRITERIOS = 3
+
         if total == 0:
             recomendacion = "SIN DATOS"
+        elif total < MINIMO_CRITERIOS:
+            recomendacion = f"DATOS INSUFICIENTES ({total}/5)"
         else:
             proporcion = cumplidos / total
             if proporcion >= 0.75:
@@ -445,9 +476,12 @@ class AnalizadorFIBRA:
             else:
                 recomendacion = "EVITAR"
 
-            # Un payout insostenible invalida cualquier otra virtud: el yield
-            # que atrae hoy es justo el que se va a recortar.
-            if payout is not None and payout > 1.10:
+        # Estas dos invalidan cualquier otra virtud y aplican aunque falten
+        # criterios: no hay descuento sobre NAV que compense no generar flujo.
+        if payout is not None:
+            if payout < 0:
+                recomendacion = "EVITAR (flujo operativo negativo)"
+            elif payout > 1.10:
                 recomendacion = "EVITAR (payout insostenible)"
 
         return {
@@ -640,6 +674,110 @@ def cargar_fundamentales() -> dict:
 # Presentacion
 # ---------------------------------------------------------------------------
 
+# Nombres cortos para --set, para no teclear el nombre completo del campo.
+ALIAS_CAMPOS = {
+    "ocupacion": "ocupacion", "ocup": "ocupacion",
+    "affo": "affo_por_cbfi_anual", "ffo": "ffo_por_cbfi_anual",
+    "nav": "nav_por_cbfi", "ltv": "ltv",
+    "yield": "yield_exigido", "exigido": "yield_exigido",
+}
+
+
+def guardar_campos(ticker: str, asignaciones: list) -> None:
+    """
+    Captura valores sin abrir el JSON a mano.
+
+        analizar_cbfi.py --set FUNO11 ocupacion=94 affo=2.90
+
+    La ocupacion se acepta como 94 o como 0.94: es el campo que mas se
+    captura y el que mas se presta a equivocar la escala.
+    """
+    ruta = directorio_datos() / ARCHIVO_FUNDAMENTALES
+    contenido = (json.loads(ruta.read_text(encoding="utf-8"))
+                 if ruta.exists() else plantilla_json())
+    fibras = contenido.setdefault("fibras", {})
+    entrada = fibras.setdefault(ticker, entrada_vacia(ticker))
+
+    for asignacion in asignaciones:
+        if "=" not in asignacion:
+            print(f"  Ignorado '{asignacion}': se escribe campo=valor")
+            continue
+        clave, _, crudo = asignacion.partition("=")
+        campo = ALIAS_CAMPOS.get(clave.strip().lower())
+        if not campo:
+            print(f"  Campo desconocido '{clave}'. Validos: "
+                  f"{', '.join(sorted(set(ALIAS_CAMPOS)))}")
+            continue
+        try:
+            valor = float(crudo.replace("%", "").replace(",", "").strip())
+        except ValueError:
+            print(f"  Valor no numerico en '{asignacion}'")
+            continue
+
+        # Porcentajes: se aceptan ambas escalas y se normaliza a fraccion.
+        if campo in ("ocupacion", "ltv", "yield_exigido") and valor > 1:
+            valor = valor / 100
+
+        entrada[campo] = valor
+        print(f"  {ticker}.{campo} = {valor}")
+
+    ruta.write_text(json.dumps(contenido, indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+    print(f"  Guardado en {ruta.name}")
+
+
+def diagnostico(ticker: str):
+    """
+    Vuelca los renglones que Yahoo devuelve para un ticker.
+
+    Los nombres del balance varian entre emisoras, y cuando un derivado sale
+    implausible (LTV de 1%, payout de 1000%) esto muestra de que renglon
+    salio y con que alias hay que buscarlo.
+    """
+    try:
+        import logging
+        logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+        import yfinance as yf
+    except ImportError:
+        print("  Falta yfinance: pip install yfinance")
+        return
+
+    simbolo = ticker if ticker.endswith(".MX") else ticker + ".MX"
+    print(f"\n{'=' * 72}\n  DIAGNOSTICO {simbolo}\n{'=' * 72}")
+
+    tk = yf.Ticker(simbolo)
+
+    try:
+        info = tk.info or {}
+        print("\ninfo (campos que usa el analizador):")
+        for clave in ("regularMarketPrice", "priceToBook", "bookValue",
+                      "sharesOutstanding", "totalDebt", "marketCap"):
+            print(f"  {clave:<22}{info.get(clave)}")
+    except Exception as e:
+        print(f"\ninfo: fallo -> {describir_fallo(e)}")
+
+    for etiqueta, obtener in (("quarterly_balance_sheet", lambda: tk.quarterly_balance_sheet),
+                              ("quarterly_cashflow", lambda: tk.quarterly_cashflow)):
+        try:
+            df = obtener()
+            if df is None or getattr(df, "empty", True):
+                print(f"\n{etiqueta}: vacio")
+                continue
+            columna = df.columns[0]
+            print(f"\n{etiqueta} (columna mas reciente: {columna}):")
+            for fila in df.index:
+                valor = df.loc[fila, columna]
+                if valor == valor and valor is not None:   # descarta NaN
+                    print(f"  {str(fila):<52}{valor:>18,.0f}")
+        except Exception as e:
+            print(f"\n{etiqueta}: fallo -> {describir_fallo(e)}")
+
+    print(f"\n{'=' * 72}")
+    print("  Pega esta salida si un derivado sale raro: sirve para corregir")
+    print("  con que nombre se busca cada renglon.")
+    print(f"{'=' * 72}\n")
+
+
 def listar_catalogo():
     print("\nFIBRAS LISTADAS EN LA BMV\n")
     print(f"{'Ticker':<12}{'Yahoo':<15}{'Nombre':<20}{'Sector'}")
@@ -684,6 +822,22 @@ def main():
 
     if "--catalogo" in sys.argv[1:]:
         listar_catalogo()
+        return
+
+    if "--set" in sys.argv[1:]:
+        if len(args) < 2:
+            print("\n  Uso:  analizar_cbfi.py --set FUNO11 ocupacion=94 affo=2.90")
+            print(f"  Campos: {', '.join(sorted(set(ALIAS_CAMPOS)))}\n")
+            return
+        guardar_campos(args[0].upper(), args[1:])
+        return
+
+    if "--diagnostico" in sys.argv[1:]:
+        if not args:
+            print("\n  Indica un ticker:  analizar_cbfi.py --diagnostico FMTY14\n")
+            return
+        for ticker in args:
+            diagnostico(ticker.upper())
         return
 
     fundamentales = cargar_fundamentales()
