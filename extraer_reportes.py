@@ -131,7 +131,7 @@ def texto_de_pdf(datos: bytes) -> Optional[str]:
         lector = PdfReader(io.BytesIO(datos))
         # Las metricas resumidas van en las primeras paginas; leer el reporte
         # completo multiplica el ruido sin agregar señal.
-        paginas = lector.pages[:12]
+        paginas = lector.pages[:28]
         return "\n".join((p.extract_text() or "") for p in paginas)
     except Exception as e:
         print(f"  No se pudo leer el PDF: {type(e).__name__}")
@@ -186,11 +186,101 @@ METRICAS = {
 }
 
 
+def _affo_por_cbfi(texto: str) -> Optional[tuple]:
+    """
+    AFFO anual por CBFI, armado con el AFFO total y los CBFIs en circulacion.
+
+    Los reportes publican el AFFO en millones para todo el fideicomiso, no por
+    certificado, asi que hay que dividirlo. La cifra por CBFI aparece en una
+    tabla de indicadores cuyo layout no sobrevive a la extraccion de texto.
+
+    Ojo con el resultado cuando la FIBRA acaba de emitir o adquirir: el AFFO es
+    del trimestre y los CBFIs son los de hoy, asi que un trimestre que solo
+    recogio parte de la operacion nueva se reparte entre todos los
+    certificados y el AFFO por CBFI sale bajo.
+    """
+    total = None
+    for patron in [
+        # Resumen ejecutivo: "FFO y AFFO se situaron en Ps. X y Ps. Y millones"
+        r"AFFO.{0,30}se situaron en Ps\.?\s*[\d,.]+\s*millones y Ps\.?\s*([\d,]+\.?\d*)",
+        r"AFFO[^\d\n]{0,30}Ps\.?\s*([\d,]+\.?\d*)\s*millones",
+    ]:
+        m = re.search(patron, texto)
+        if m:
+            try:
+                total = float(m.group(1).replace(",", "")) * 1e6
+                break
+            except ValueError:
+                pass
+
+    if total is None:
+        # Tabla: "AFFO generado 834,471" viene en miles.
+        m = re.search(r"AFFO\s+generado\s+([\d,]+)", texto)
+        if m:
+            try:
+                total = float(m.group(1).replace(",", "")) * 1e3
+            except ValueError:
+                pass
+
+    if total is None:
+        return None
+
+    # Estas tablas listan la serie de trimestres, asi que el segundo numero es
+    # el trimestre anterior. Comparar ambos detecta la dilucion reciente que
+    # invalida el calculo: si la FIBRA acaba de emitir o adquirir, el AFFO del
+    # trimestre se reparte entre certificados que casi no contribuyeron a el.
+    serie = re.search(
+        r"CBFIs?\s+en\s+circulaci[oó]n\s*\(en\s+miles\)\s*(?:\(\d+\)\s*)?"
+        r"([\d,]+\.?\d*)\s+([\d,]+\.?\d*)", texto)
+    if serie:
+        try:
+            actual, previo = [float(g.replace(",", "")) for g in serie.groups()]
+            if previo and actual / previo > 1.20:
+                # Fibra Mty paso de 2.4 a 4.8 mil millones de CBFIs al comprar
+                # Fibra Macquarie, y su AFFO por CBFI salia a la mitad de lo
+                # que corresponde: el payout daba 144% y la mandaba a EVITAR.
+                return None
+        except ValueError:
+            pass
+
+    cbfis = None
+    # El (?:\(\d+\)\s*)? salta la llamada a nota al pie que va entre la
+    # etiqueta y la cifra: "CBFIs en circulacion (en miles) (4) 4,804,828.304".
+    for patron, escala in [
+        (r"CBFIs?\s+en\s+circulaci[oó]n\s*\(en\s+miles\)\s*(?:\(\d+\)\s*)?([\d,]+\.?\d*)", 1e3),
+        (r"CBFIs?\s+en\s+circulaci[oó]n[^\d\n]{0,40}(?:\(\d+\)\s*)?([\d,]{9,})", 1.0),
+    ]:
+        m = re.search(patron, texto)
+        if m:
+            try:
+                cbfis = float(m.group(1).replace(",", "")) * escala
+                break
+            except ValueError:
+                pass
+
+    if not cbfis:
+        return None
+
+    anual = (total / cbfis) * 4   # el reporte es trimestral
+    if not (0.01 <= anual <= 20.0):
+        return None
+
+    contexto = (f"AFFO total {total/1e6:,.1f} millones / "
+                f"{cbfis/1e6:,.0f} millones de CBFIs, anualizado")
+    return anual, contexto
+
+
 def extraer(texto: str, verbose: bool = False) -> dict:
     """Devuelve {campo: (valor, contexto)} de lo que se pudo validar."""
     hallazgos = {}
 
+    compuesto = _affo_por_cbfi(texto)
+    if compuesto:
+        hallazgos["affo_por_cbfi_anual"] = compuesto
+
     for campo, config in METRICAS.items():
+        if campo in hallazgos:
+            continue
         for patron in config["patrones"]:
             for coincidencia in re.finditer(patron, texto):
                 crudo = coincidencia.group(1).replace(",", ".")

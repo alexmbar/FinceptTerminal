@@ -452,6 +452,14 @@ class FIBRA:
             "ltv": m.ltv,
             "ffo_por_cbfi_anual": m.ffo_por_cbfi_anual,
         }
+
+        # Un derivado de un balance de hace años no es un dato con reservas,
+        # es un dato ausente: describe una FIBRA que ya no existe. Se descarta
+        # para que su criterio se omita y el veredicto salga con lo que si
+        # esta al dia, en vez de bloquear el analisis entero.
+        if m.balance_obsoleto:
+            for campo in ("nav_por_cbfi", "ltv", "ffo_por_cbfi_anual"):
+                auto[campo] = None
         for campo, valor in auto.items():
             if getattr(self, campo) is None and valor is not None:
                 setattr(self, campo, valor)
@@ -576,15 +584,11 @@ class AnalizadorFIBRA:
             elif payout > 1.10:
                 recomendacion = "EVITAR (payout insostenible)"
 
-        # Un balance de hace años describe una FIBRA que ya no es la que
-        # cotiza. Condenarla con eso es peor que no opinar: FMTY14 salia
-        # EVITAR por un flujo operativo de 2023. Lo que viene del JSON si
-        # vale, porque lo capturaste del reporte al dia.
-        if self.f.mercado.balance_obsoleto:
-            derivados = {"ltv", "nav_por_cbfi", "ffo_por_cbfi_anual"}
-            if any(self.f.procedencia.get(c) == "auto" for c in derivados):
-                fecha = self.f.mercado.fecha_balance or "?"
-                recomendacion = f"DATOS OBSOLETOS (balance {fecha})"
+        # Los derivados de un balance viejo ya se descartaron al combinar, asi
+        # que aqui solo queda avisar cuando eso dejo la evaluacion sin piso.
+        if self.f.mercado.balance_obsoleto and total < MINIMO_CRITERIOS:
+            fecha = self.f.mercado.fecha_balance or "?"
+            recomendacion = f"DATOS OBSOLETOS (balance {fecha})"
 
         return {
             "yield": y, "payout_affo": payout, "p_ffo": self.p_ffo(),
