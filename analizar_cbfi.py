@@ -71,10 +71,18 @@ def directorio_datos() -> Path:
     """
     Carpeta donde vive el JSON.
 
-    Compilado con PyInstaller --onefile, __file__ apunta a un temporal que se
-    borra al salir; el JSON tiene que quedar junto al .exe para que el usuario
-    lo pueda editar.
+    Se prefiere el directorio actual si ya hay un JSON ahi. Sin esto el .exe en
+    dist/ y el script en la raiz mantienen archivos distintos, y lo capturado
+    con --extraer o --set desde el script no aparece al correr el ejecutable.
+
+    Cuando no hay ninguno se cae al directorio del programa: compilado con
+    --onefile, __file__ apunta a un temporal que se borra al salir, asi que
+    tiene que ser el del .exe para que el archivo sobreviva.
     """
+    actual = Path.cwd() / ARCHIVO_FUNDAMENTALES
+    if actual.exists():
+        return actual.parent
+
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent
@@ -1028,7 +1036,7 @@ def main():
     print()
     print(f"  Precio y distribuciones: Yahoo Finance, pueden traer retraso.")
     print(f"  Confirma en GBM antes de operar.")
-    print(f"  Fundamentales: {ARCHIVO_FUNDAMENTALES} (llenalo del reporte trimestral)")
+    print(f"  Fundamentales: {directorio_datos() / ARCHIVO_FUNDAMENTALES}")
     print("=" * 72 + "\n")
 
 

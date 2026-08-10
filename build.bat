@@ -111,6 +111,22 @@ if not exist "dist\AnalizadorCBFI.exe" (
     exit /b 1
 )
 
+REM Salvaguarda: con yfinance y sus dependencias el .exe no baja de ~25 MB.
+REM Si sale mucho menor, PyInstaller corrio con un interprete que no las tiene
+REM (tipico al compilar dentro de un venv sin instalarlas ahi). El .exe se
+REM genera igual y falla recien al descargar, con todo en blanco.
+for %%A in ("dist\AnalizadorCBFI.exe") do set TAM=%%~zA
+if %TAM% LSS 20000000 (
+    echo.
+    echo   ADVERTENCIA: el .exe pesa solo %TAM% bytes.
+    echo   Se esperan mas de 25 MB con yfinance empaquetado.
+    echo   Probablemente compilaste con un Python que no tiene las
+    echo   dependencias. Verifica con:
+    echo       python -c "import yfinance, pypdf"
+    echo   y vuelve a compilar con ese mismo interprete.
+    echo.
+)
+
 REM ---------------------------------------------------------------------------
 REM Resultado
 REM ---------------------------------------------------------------------------

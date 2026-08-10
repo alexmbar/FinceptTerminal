@@ -131,7 +131,19 @@ def build():
     if not exe.exists():
         die("PyInstaller termino sin error pero no genero el ejecutable")
 
-    ok(f"{exe.name} generado ({exe.stat().st_size / (1024 * 1024):.1f} MB)")
+    tam_mb = exe.stat().st_size / (1024 * 1024)
+    ok(f"{exe.name} generado ({tam_mb:.1f} MB)")
+
+    # Con yfinance y sus dependencias el ejecutable no baja de ~25 MB. Mucho
+    # menos significa que PyInstaller corrio con un interprete que no las
+    # tiene, tipicamente un venv donde no se instalaron. El .exe se genera
+    # igual y solo falla al descargar, mostrando todo en blanco.
+    if tam_mb < 20:
+        print(f"  ADVERTENCIA: {tam_mb:.1f} MB es muy poco para incluir yfinance.")
+        print(f"  Compilaste con {sys.executable}")
+        print("  Verifica ahi mismo:  python -c \"import yfinance, pypdf\"")
+        print("  y recompila con ese interprete.\n")
+
     return exe
 
 
