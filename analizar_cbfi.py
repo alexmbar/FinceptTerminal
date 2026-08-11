@@ -29,6 +29,10 @@ USO
     python analizar_cbfi.py FUNO11       analiza solo esa
     python analizar_cbfi.py --catalogo   lista las 16 FIBRAs de la BMV
     python analizar_cbfi.py --sin-red    omite la descarga
+    python analizar_cbfi.py --sin-pdf    no genera el reporte PDF
+
+Cada corrida deja un PDF con la comparativa, el detalle por FIBRA y las
+notas de procedencia de cada cifra.
 
 Requiere: pip install yfinance
 """
@@ -1024,6 +1028,18 @@ def main():
         if not detalle:
             print(f"\n  Detalle de una: python analizar_cbfi.py FUNO11")
             print(f"  Detalle de todas: agrega --detalle")
+
+    # El PDF sale en cada corrida: es el entregable que queda para revisar o
+    # archivar, y pedirlo con una bandera hacia que casi siempre se olvidara.
+    if "--sin-pdf" not in sys.argv[1:]:
+        try:
+            import reporte_pdf
+            ruta = reporte_pdf.generar(fibras)
+            print(f"\n  PDF generado: {ruta}")
+        except ImportError:
+            print("\n  Sin PDF: falta reportlab (pip install reportlab)")
+        except Exception as e:
+            print(f"\n  No se pudo generar el PDF: {type(e).__name__}: {e}")
 
     sin_datos = [f.ticker for f in fibras
                  if AnalizadorFIBRA(f).evaluar()["total"] == 0]

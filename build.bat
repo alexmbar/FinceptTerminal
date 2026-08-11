@@ -48,10 +48,10 @@ for /f "tokens=*" %%v in ('python -m PyInstaller --version 2^>^&1') do echo   OK
 
 echo.
 echo       Verificando yfinance (descarga de precios)...
-python -c "import yfinance, pypdf" >nul 2>&1
+python -c "import yfinance, pypdf, reportlab" >nul 2>&1
 if errorlevel 1 (
     echo       yfinance no disponible. Instalando...
-    python -m pip install yfinance pypdf
+    python -m pip install yfinance pypdf reportlab
     python -c "import yfinance" >nul 2>&1
     if errorlevel 1 (
         echo   ERROR: No se pudo instalar yfinance
@@ -91,6 +91,8 @@ python -m PyInstaller ^
     --collect-all curl_cffi ^
     --hidden-import pypdf ^
     --hidden-import extraer_reportes ^
+    --hidden-import reporte_pdf ^
+    --collect-all reportlab ^
     --distpath dist ^
     --workpath build ^
     --specpath build ^

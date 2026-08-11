@@ -183,3 +183,6 @@ fincept-qt/docs/CRYPTO_WALLET_CONNECT.md
 
 dist/
 build/
+
+# Reportes generados por el analizador
+analisis_cbfi_*.pdf

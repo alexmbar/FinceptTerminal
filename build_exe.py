@@ -43,13 +43,13 @@ def check_python():
 def check_yfinance():
     """yfinance se necesita en tiempo de build para que PyInstaller lo empaque."""
     try:
-        import yfinance, pypdf  # noqa: F401
+        import yfinance, pypdf, reportlab  # noqa: F401
         return
     except ImportError:
         pass
 
     print("  yfinance no disponible. Instalando...")
-    if subprocess.run([sys.executable, "-m", "pip", "install", "yfinance", "pypdf"]).returncode != 0:
+    if subprocess.run([sys.executable, "-m", "pip", "install", "yfinance", "pypdf", "reportlab"]).returncode != 0:
         die("No se pudo instalar yfinance")
     try:
         import yfinance  # noqa: F401
@@ -113,6 +113,8 @@ def build():
         "--collect-all", "curl_cffi",
         "--hidden-import", "pypdf",
         "--hidden-import", "extraer_reportes",
+        "--hidden-import", "reporte_pdf",
+        "--collect-all", "reportlab",
         "--distpath", "dist",
         # --workpath, NO --buildpath: esa opcion no existe en PyInstaller.
         "--workpath", "build",
