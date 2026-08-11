@@ -129,10 +129,12 @@ def texto_de_pdf(datos: bytes) -> Optional[str]:
         return None
     try:
         lector = PdfReader(io.BytesIO(datos))
-        # Las metricas resumidas van en las primeras paginas; leer el reporte
-        # completo multiplica el ruido sin agregar señal.
-        paginas = lector.pages[:28]
-        return "\n".join((p.extract_text() or "") for p in paginas)
+        # Se lee el reporte entero. El resumen ejecutivo trae LTV y ocupacion
+        # en las primeras paginas, pero la tabla con los CBFIs en circulacion
+        # cae mucho despues (pagina 30+ en Fibra Mty) y sin ella no hay AFFO.
+        # El ruido extra lo contienen los rangos de plausibilidad y el orden
+        # de los patrones, que prueban primero los del resumen.
+        return "\n".join((p.extract_text() or "") for p in lector.pages)
     except Exception as e:
         print(f"  No se pudo leer el PDF: {type(e).__name__}")
         return None
@@ -333,9 +335,49 @@ def descubrir(ticker: str) -> Optional[str]:
     return None
 
 
-def procesar(ticker: str, verbose: bool = False, guardar: bool = True) -> dict:
-    """Descarga el reporte de una FIBRA y guarda lo que logre extraer."""
-    url = descubrir(ticker)
+def url_guardada(ticker: str) -> Optional[str]:
+    """URL del reporte registrada para este ticker en el JSON."""
+    try:
+        import analizar_cbfi as base
+        ruta = base.directorio_datos() / base.ARCHIVO_FUNDAMENTALES
+        if ruta.exists():
+            entrada = json.loads(ruta.read_text(encoding="utf-8")) \
+                          .get("fibras", {}).get(ticker, {})
+            return entrada.get("_url_reporte")
+    except Exception:
+        pass
+    return None
+
+
+def procesar(ticker: str, verbose: bool = False, guardar: bool = True,
+             origen: Optional[str] = None) -> dict:
+    """
+    Extrae los fundamentales del reporte de una FIBRA.
+
+    `origen` puede ser la ruta de un PDF que ya bajaste o su URL. Sin el se
+    intenta la URL registrada en el JSON y, en ultimo caso, el descubrimiento
+    automatico, que solo acierta en las tres FIBRAs cuyo patron de URL esta
+    verificado: las demas hospedan en sitios propios, varias con rutas que
+    incluyen hashes y no hay forma de derivarlas.
+    """
+    origen = origen or url_guardada(ticker)
+
+    if origen and not origen.lower().startswith("http"):
+        ruta_pdf = Path(origen)
+        if not ruta_pdf.exists():
+            print(f"    no existe el archivo {ruta_pdf}")
+            return {}
+        print(f"    leyendo {ruta_pdf.name}")
+        datos = ruta_pdf.read_bytes()
+        if datos[:4] != b"%PDF":
+            print(f"    {ruta_pdf.name} no es un PDF")
+            return {}
+        texto = texto_de_pdf(datos)
+        if not texto:
+            return {}
+        return _procesar_texto(ticker, texto, verbose, guardar)
+
+    url = origen or descubrir(ticker)
     if not url:
         return {}
 
@@ -349,20 +391,25 @@ def procesar(ticker: str, verbose: bool = False, guardar: bool = True) -> dict:
     if not texto:
         return {}
 
+    return _procesar_texto(ticker, texto, verbose, guardar, url)
+
+
+def _procesar_texto(ticker: str, texto: str, verbose: bool, guardar: bool,
+                    url: Optional[str] = None) -> dict:
     hallazgos = extraer(texto, verbose=verbose)
     if not hallazgos:
         print(f"    PDF leido pero sin cifras reconocibles.")
-        print(f"    Corre con --verbose para ver que se ley[o.")
+        print(f"    Corre con --verbose para ver que se leyo.")
         return {}
 
     print(f"    extraido: {', '.join(hallazgos)}")
 
     if guardar:
-        _guardar(ticker, hallazgos)
+        _guardar(ticker, hallazgos, url)
     return {campo: valor for campo, (valor, _) in hallazgos.items()}
 
 
-def _guardar(ticker: str, hallazgos: dict) -> None:
+def _guardar(ticker: str, hallazgos: dict, url: Optional[str] = None) -> None:
     """Escribe en el JSON, marcando la procedencia como 'pdf'."""
     import analizar_cbfi as base
 
@@ -371,6 +418,11 @@ def _guardar(ticker: str, hallazgos: dict) -> None:
                  if ruta.exists() else base.plantilla_json())
     entrada = contenido.setdefault("fibras", {}).setdefault(
         ticker, base.entrada_vacia(ticker))
+
+    # La URL que si funciono queda registrada para el proximo trimestre: casi
+    # siempre basta cambiarle el numero de trimestre.
+    if url:
+        entrada["_url_reporte"] = url
 
     for campo, (valor, _) in hallazgos.items():
         entrada[campo] = round(valor, 4)
@@ -402,16 +454,24 @@ def main():
         import analizar_cbfi as base
         objetivos = list(base.CATALOGO)
     elif args:
-        objetivos = [t.upper() for t in args]
+        objetivos = [args[0].upper()] + args[1:]
     else:
         print("\n  Uso:  extraer_reportes.py FMTY14 [--verbose]")
         print("        extraer_reportes.py --todas")
         print("        extraer_reportes.py --descubrir FUNO11\n")
         return
 
+    # Segundo argumento: PDF ya descargado o URL directa. Es la unica via
+    # para las FIBRAs cuyo hosting no sigue un patron derivable.
+    origen = objetivos[1] if len(objetivos) == 2 and (
+        objetivos[1].lower().startswith("http")
+        or objetivos[1].lower().endswith(".pdf")) else None
+    if origen:
+        objetivos = objetivos[:1]
+
     logrados, fallidos = [], []
     for ticker in objetivos:
-        resultado = procesar(ticker, verbose=verbose)
+        resultado = procesar(ticker, verbose=verbose, origen=origen)
         (logrados if resultado else fallidos).append(ticker)
 
     print("\n" + "=" * 72)

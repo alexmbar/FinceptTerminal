@@ -955,14 +955,19 @@ def main():
         except ImportError:
             print("\n  Falta extraer_reportes.py junto al programa.\n")
             return
-        objetivos = ([t.upper() for t in args] if args
+        origen = args[1] if len(args) == 2 and (
+            args[1].lower().startswith("http")
+            or args[1].lower().endswith(".pdf")) else None
+        objetivos = ([args[0].upper()] if origen
+                     else [t.upper() for t in args] if args
                      else (list(CATALOGO) if "--todas" in sys.argv else []))
         if not objetivos:
             print("\n  Uso:  analizar_cbfi.py --extraer FMTY14 [--verbose]")
             print("        analizar_cbfi.py --extraer --todas\n")
             return
         for ticker in objetivos:
-            extraer_reportes.procesar(ticker, verbose="--verbose" in sys.argv)
+            extraer_reportes.procesar(ticker, verbose="--verbose" in sys.argv,
+                                      origen=origen)
         return
 
     if "--diagnostico" in sys.argv[1:]:
