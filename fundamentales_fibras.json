@@ -1,0 +1,162 @@
+{
+  "_ayuda": {
+    "de_donde": "Reporte trimestral de cada FIBRA (relacion con inversionistas).",
+    "que_llenar": "Solo AFFO y ocupacion: NAV, LTV y FFO se derivan solos.",
+    "yield_exigido": "Tu tasa exigida: CETES/TIIE 1 año + spread. 0.10 = 10%",
+    "affo_por_cbfi_anual": "AFFO anual por CBFI, en pesos. Sin el, el payout se mide contra FFO (vara mas laxa).",
+    "nav_por_cbfi": "Solo si quieres pisar el estimado con la cifra oficial.",
+    "ltv": "Apalancamiento oficial. 0.259 = 25.9%",
+    "ocupacion": "0.96 = 96%. No hay forma de derivarlo.",
+    "nota": "Deja en null lo que no tengas: el criterio se omite, no cuenta como fallo."
+  },
+  "fibras": {
+    "FUNO11": {
+      "_sector": "Diversificada (comercial/industrial/oficinas)",
+      "yield_exigido": 0.1,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FIBRAMQ12": {
+      "_sector": "Industrial",
+      "yield_exigido": 0.1,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FIBRAPL14": {
+      "_sector": "Industrial",
+      "yield_exigido": 0.1,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "DANHOS13": {
+      "_sector": "Comercial / oficinas",
+      "yield_exigido": 0.105,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FMTY14": {
+      "_sector": "Diversificada (distribuye mensual)",
+      "yield_exigido": 0.1,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": 0.328,
+      "ocupacion": 0.939,
+      "_fuente": "pdf"
+    },
+    "FSHOP13": {
+      "_sector": "Centros comerciales",
+      "yield_exigido": 0.11,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FIHO12": {
+      "_sector": "Hotelero",
+      "yield_exigido": 0.12,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FINN13": {
+      "_sector": "Hotelero",
+      "yield_exigido": 0.12,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FHIPO14": {
+      "_sector": "Hipotecario",
+      "yield_exigido": 0.11,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FNOVA17": {
+      "_sector": "Industrial",
+      "yield_exigido": 0.1,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": 0.3,
+      "ocupacion": 1.0,
+      "_fuente": "pdf"
+    },
+    "FPLUS16": {
+      "_sector": "Desarrollo",
+      "yield_exigido": 0.13,
+      "affo_por_cbfi_anual": 0.3091,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": 0.3051,
+      "ocupacion": 0.955,
+      "_fuente": "pdf",
+      "_url_reporte": "http://cdn.investorcloud.net/fibraplus/InformacionFinanciera/ReportesTrimestrales/2026-2T26.pdf"
+    },
+    "STORAGE18": {
+      "_sector": "Self-storage",
+      "yield_exigido": 0.105,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "EDUCA18": {
+      "_sector": "Educativo",
+      "yield_exigido": 0.105,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FCFE18": {
+      "_sector": "Energia (FIBRA E)",
+      "yield_exigido": 0.1,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "FMX23": {
+      "_sector": "Sector sin confirmar",
+      "yield_exigido": 0.11,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    },
+    "NEXT25": {
+      "_sector": "Sector sin confirmar",
+      "yield_exigido": 0.11,
+      "affo_por_cbfi_anual": null,
+      "ffo_por_cbfi_anual": null,
+      "nav_por_cbfi": null,
+      "ltv": null,
+      "ocupacion": null
+    }
+  }
+}

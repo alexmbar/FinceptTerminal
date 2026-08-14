@@ -21,6 +21,11 @@ Finance al ejecutar. Los fundamentales (AFFO, NAV, LTV, ocupacion) solo
 cambian cada trimestre y Yahoo no los publica para FIBRAs mexicanas: se leen
 de fundamentales_fibras.json, que tu llenas con el reporte trimestral.
 
+Si esta la variable de entorno FIBRASMX_API_KEY, AFFO, FFO, LTV, NAV y
+ocupacion tambien se completan con la API de fibrasmx.com (datos premium
+curados por FIBRA, no derivados a mano del balance) antes de caer en la
+estimacion via Yahoo. El JSON manual sigue mandando sobre todo lo demas.
+
 Sin conexion el programa sigue corriendo: avisa y usa solo el JSON.
 
 USO
@@ -35,10 +40,14 @@ Cada corrida deja un PDF con la comparativa, el detalle por FIBRA y las
 notas de procedencia de cada cifra.
 
 Requiere: pip install yfinance
+Opcional: variable de entorno FIBRASMX_API_KEY (fibrasmx.com/perfil)
 """
 
 import json
+import os
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -423,6 +432,112 @@ def describir_fallo(e: Exception) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Descarga de fibrasmx.com (fundamentales premium, opcional)
+# ---------------------------------------------------------------------------
+
+FIBRASMX_BASE = "https://fibrasmx.com/api/v1/sheets"
+
+# Se apaga en cuanto la key falla (401/403) o se agota el cupo (429): sin
+# esto cada FIBRA restante repetiria la misma llamada condenada a fallar,
+# gastando cupo diario en puro ruido.
+_fibrasmx_deshabilitado = False
+
+
+@dataclass
+class DatosFibrasMX:
+    affo_por_cbfi_anual: Optional[float] = None
+    ffo_por_cbfi_anual: Optional[float] = None
+    nav_por_cbfi: Optional[float] = None
+    ltv: Optional[float] = None
+    ocupacion: Optional[float] = None
+    error: Optional[str] = None
+
+
+def _fibrasmx_get(path_y_query: str, api_key: str) -> tuple:
+    """GET a un endpoint de fibrasmx.com. Devuelve (texto, error)."""
+    sep = "&" if "?" in path_y_query else "?"
+    url = f"{FIBRASMX_BASE}{path_y_query}{sep}key={api_key}"
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            return resp.read().decode("utf-8").strip(), None
+    except urllib.error.HTTPError as e:
+        cuerpo = e.read().decode("utf-8", "ignore").strip()[:80]
+        return None, f"HTTP {e.code}: {cuerpo or e.reason}"
+    except Exception as e:
+        return None, describir_fallo(e)
+
+
+def descargar_fibrasmx(ticker: str, api_key: str) -> DatosFibrasMX:
+    """
+    Completa AFFO/FFO/LTV/NAV/ocupacion desde la API premium de fibrasmx.com.
+
+    ffo_per_cbfi y affo_per_cbfi que da la API son POR TRIMESTRE, no
+    anualizados (confirmado contra /metrics: vienen etiquetados '2025Q4',
+    '2025Q3', ...). Usar ese numero tal cual como si fuera el anual habria
+    inflado el payout ~4x y marcado FIBRAs sanas como insostenibles, asi que
+    aqui se piden los ultimos 4 trimestres y se suman; si no vienen los 4
+    (FIBRA con poco historial, o el campo no trae dato ese trimestre) se deja
+    sin dato en vez de anualizar con una muestra incompleta.
+    """
+    global _fibrasmx_deshabilitado
+    datos = DatosFibrasMX()
+    if _fibrasmx_deshabilitado:
+        datos.error = "deshabilitado en esta corrida (fallo antes)"
+        return datos
+
+    def _reportar_fallo_global(err: str) -> bool:
+        """Si el fallo es de key o cupo, no vale la pena seguir intentando."""
+        global _fibrasmx_deshabilitado
+        if "HTTP 401" in err or "HTTP 403" in err:
+            _fibrasmx_deshabilitado = True
+            datos.error = f"API key invalida o vencida ({err})"
+            return True
+        if "HTTP 429" in err:
+            _fibrasmx_deshabilitado = True
+            datos.error = "cupo diario agotado (HTTP 429)"
+            return True
+        return False
+
+    campos_directos = {"ltv": "ltv", "ocupacion": "occupancy", "nav_por_cbfi": "nav_per_cbfi"}
+    for campo, nombre_api in campos_directos.items():
+        texto, err = _fibrasmx_get(f"/{ticker}/{nombre_api}", api_key)
+        if err:
+            if _reportar_fallo_global(err):
+                return datos
+            continue
+        try:
+            setattr(datos, campo, float(texto))
+        except (TypeError, ValueError):
+            pass   # "N/D" u otro texto: sin dato para ese campo, no es fallo
+
+    texto, err = _fibrasmx_get(
+        f"/{ticker}/metrics?fields=ffo_per_cbfi,affo_per_cbfi&periods=4", api_key)
+    if err:
+        if _reportar_fallo_global(err):
+            return datos
+    elif texto:
+        ffo_trimestres, affo_trimestres = [], []
+        for linea in texto.splitlines():
+            partes = linea.split(",")
+            if len(partes) < 3:
+                continue
+            try:
+                ffo_trimestres.append(float(partes[1]))
+            except ValueError:
+                pass
+            try:
+                affo_trimestres.append(float(partes[2]))
+            except ValueError:
+                pass
+        if len(ffo_trimestres) == 4:
+            datos.ffo_por_cbfi_anual = sum(ffo_trimestres)
+        if len(affo_trimestres) == 4:
+            datos.affo_por_cbfi_anual = sum(affo_trimestres)
+
+    return datos
+
+
+# ---------------------------------------------------------------------------
 # Modelo
 # ---------------------------------------------------------------------------
 
@@ -477,10 +592,34 @@ class FIBRA:
                 setattr(self, campo, valor)
                 self.procedencia[campo] = "auto"
 
+    def completar_con_fibrasmx(self, d: "DatosFibrasMX") -> None:
+        """
+        Igual que completar_con, pero desde fibrasmx.com.
+
+        Se llama ANTES que completar_con(mercado): estos son datos curados
+        por FIBRA (premium), mejor que la estimacion generica que se arma a
+        mano desde el balance de Yahoo. El JSON manual sigue mandando sobre
+        ambos, porque nada le gana a la cifra oficial del reporte trimestral.
+        """
+        auto = {
+            "affo_por_cbfi_anual": d.affo_por_cbfi_anual,
+            "ffo_por_cbfi_anual": d.ffo_por_cbfi_anual,
+            "nav_por_cbfi": d.nav_por_cbfi,
+            "ltv": d.ltv,
+            "ocupacion": d.ocupacion,
+        }
+        for campo, valor in auto.items():
+            if getattr(self, campo) is None and valor is not None:
+                setattr(self, campo, valor)
+                self.procedencia[campo] = "fibrasmx"
+
     def marca(self, campo: str) -> str:
         if getattr(self, campo) is None:
             return ""
-        return "auto" if self.procedencia.get(campo) == "auto" else "manual"
+        origen = self.procedencia.get(campo)
+        if origen in ("auto", "fibrasmx"):
+            return origen
+        return "manual"
 
     @property
     def nombre(self) -> str:
@@ -620,7 +759,7 @@ class AnalizadorFIBRA:
 
         def linea(etiqueta, valor, nota="", campo=None):
             origen = f"[{f.marca(campo)}]" if campo and f.marca(campo) else ""
-            print(f"  {etiqueta:<26}{valor:>12}  {origen:<9}{nota}".rstrip())
+            print(f"  {etiqueta:<26}{valor:>12}  {origen:<11}{nota}".rstrip())
 
         print("\nMERCADO", end="")
         if m.ok:
@@ -673,7 +812,7 @@ class AnalizadorFIBRA:
               campo="ocupacion")
 
         if m.avisos:
-            print("\n  Sobre los estimados [auto]:")
+            print("\n  Sobre los estimados [auto] (derivados del balance de Yahoo):")
             for aviso in dict.fromkeys(m.avisos):
                 print(f"    - {aviso}")
 
@@ -997,11 +1136,23 @@ def main():
     if not sin_red and len(tickers) > 4:
         print(f"\n  Descargando {len(tickers)} FIBRAs de Yahoo. Toma un par de minutos.\n")
 
+    fibrasmx_key = os.environ.get("FIBRASMX_API_KEY")
+    fibrasmx_aviso_impreso = False
+
     fibras = []
     for i, ticker in enumerate(tickers, 1):
         datos = fundamentales.get(ticker, {})
         fibra = FIBRA(ticker=ticker,
                       **{k: datos.get(k) for k in CAMPOS_JSON if datos.get(k) is not None})
+
+        if not sin_red and fibrasmx_key:
+            dfx = descargar_fibrasmx(ticker, fibrasmx_key)
+            if dfx.error:
+                if not fibrasmx_aviso_impreso:
+                    print(f"\n  FibrasMX: {dfx.error}\n")
+                    fibrasmx_aviso_impreso = True
+            else:
+                fibra.completar_con_fibrasmx(dfx)
 
         if not sin_red:
             print(f"  [{i}/{len(tickers)}] {ticker}...".ljust(50), end="\r")
@@ -1058,6 +1209,11 @@ def main():
     print(f"  Precio y distribuciones: Yahoo Finance, pueden traer retraso.")
     print(f"  Confirma en GBM antes de operar.")
     print(f"  Fundamentales: {directorio_datos() / ARCHIVO_FUNDAMENTALES}")
+    if fibrasmx_key and not sin_red:
+        print(f"  AFFO/FFO/LTV/NAV/ocupacion sin dato en el JSON: fibrasmx.com [fibrasmx]")
+    elif not fibrasmx_key:
+        print(f"  Tip: variable de entorno FIBRASMX_API_KEY completa AFFO/FFO/LTV/")
+        print(f"  NAV/ocupacion automatico (fibrasmx.com/perfil).")
     print("=" * 72 + "\n")
 
 
