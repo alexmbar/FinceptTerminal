@@ -145,6 +145,13 @@ def leer_cartera(ruta) -> Cartera:
             continue
         if _es_fila_encabezado(primero) or seccion is None:
             continue
+        # Titulo de una sub-seccion que no reconocemos por nombre (p. ej.
+        # "Valores en Reporto"): no trae numero de titulos, a diferencia de
+        # cualquier renglon de datos real (hasta el efectivo en $0 trae un
+        # 0). Se ignora y la seccion vigente no cambia, así sus renglones
+        # de datos se siguen sumando a la tabla en la que ya estábamos.
+        if fila[1] is None:
+            continue
 
         # Columnas: Emisora, Titulos, Costo prom, Precio mdo, PPP,
         # Valor mdo, P/M, %Var.Hist, %Var.Dia, ImpXCto, %Cartera
