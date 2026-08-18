@@ -26,6 +26,11 @@ ocupacion tambien se completan con la API de fibrasmx.com (datos premium
 curados por FIBRA, no derivados a mano del balance) antes de caer en la
 estimacion via Yahoo. El JSON manual sigue mandando sobre todo lo demas.
 
+Lo que se pide a fibrasmx.com se guarda en fibrasmx_historico.db (SQLite) y
+se reusa el resto del dia: correr el programa varias veces el mismo dia no
+vuelve a gastar cupo. De paso queda un historico con lo que se vio cada dia
+que se consulto. Con --refrescar se ignora ese cache y se vuelve a pedir.
+
 Sin conexion el programa sigue corriendo: avisa y usa solo el JSON.
 
 USO
@@ -35,6 +40,10 @@ USO
     python analizar_cbfi.py --catalogo   lista las 16 FIBRAs de la BMV
     python analizar_cbfi.py --sin-red    omite la descarga
     python analizar_cbfi.py --sin-pdf    no genera el reporte PDF
+    python analizar_cbfi.py --refrescar  ignora el cache de fibrasmx.com de hoy
+    python analizar_cbfi.py --cartera archivo.xlsx
+                                      analiza tu cartera exportada de GBM y
+                                      genera cartera_gbm_YYYY-MM-DD.pdf
 
 Cada corrida deja un PDF con la comparativa, el detalle por FIBRA y las
 notas de procedencia de cada cifra.
@@ -45,6 +54,7 @@ Opcional: variable de entorno FIBRASMX_API_KEY (fibrasmx.com/perfil)
 
 import json
 import os
+import sqlite3
 import sys
 import urllib.error
 import urllib.request
@@ -535,6 +545,51 @@ def descargar_fibrasmx(ticker: str, api_key: str) -> DatosFibrasMX:
             datos.affo_por_cbfi_anual = sum(affo_trimestres)
 
     return datos
+
+
+ARCHIVO_HISTORICO = "fibrasmx_historico.db"
+
+_CAMPOS_HISTORICO = ("affo_por_cbfi_anual", "ffo_por_cbfi_anual",
+                     "nav_por_cbfi", "ltv", "ocupacion")
+
+
+def conectar_historico() -> sqlite3.Connection:
+    """
+    Abre (y crea si hace falta) el SQLite donde se cachea fibrasmx.com.
+
+    Una fila por ticker por dia: mientras exista la de hoy no se vuelve a
+    pedir, y lo de dias anteriores queda como historico de lo que se vio.
+    """
+    ruta = directorio_datos() / ARCHIVO_HISTORICO
+    con = sqlite3.connect(ruta)
+    con.execute(f"""
+        CREATE TABLE IF NOT EXISTS historico (
+            ticker TEXT NOT NULL,
+            fecha TEXT NOT NULL,
+            {', '.join(f'{c} REAL' for c in _CAMPOS_HISTORICO)},
+            PRIMARY KEY (ticker, fecha)
+        )
+    """)
+    return con
+
+
+def _historico_de_hoy(con: sqlite3.Connection, ticker: str) -> Optional[DatosFibrasMX]:
+    fila = con.execute(
+        f"SELECT {', '.join(_CAMPOS_HISTORICO)} FROM historico "
+        f"WHERE ticker = ? AND fecha = ?", (ticker, date.today().isoformat())
+    ).fetchone()
+    if fila is None:
+        return None
+    return DatosFibrasMX(**dict(zip(_CAMPOS_HISTORICO, fila)))
+
+
+def _guardar_historico(con: sqlite3.Connection, ticker: str, d: DatosFibrasMX) -> None:
+    columnas = ("ticker", "fecha") + _CAMPOS_HISTORICO
+    valores = (ticker, date.today().isoformat()) + tuple(getattr(d, c) for c in _CAMPOS_HISTORICO)
+    con.execute(
+        f"INSERT OR REPLACE INTO historico ({', '.join(columnas)}) "
+        f"VALUES ({', '.join('?' * len(columnas))})", valores)
+    con.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1069,9 +1124,106 @@ def tabla_comparativa(fibras):
               f"  {r['recomendacion']}")
 
 
+def analizar_cartera(argv: list, sin_red: bool, refrescar_fibrasmx: bool) -> None:
+    """
+    Lee tu cartera exportada de GBM y genera cartera_gbm_YYYY-MM-DD.pdf.
+
+    Reusa el mismo pipeline de descarga (Yahoo + fibrasmx.com opcional) que
+    el analisis normal, pero solo para las emisoras que de verdad tienes en
+    cartera, en vez de las del catalogo completo o del JSON.
+    """
+    try:
+        import cartera_gbm
+    except ImportError:
+        print("\n  Falta cartera_gbm.py junto al programa.\n")
+        return
+
+    idx = argv.index("--cartera")
+    if idx + 1 >= len(argv):
+        print('\n  Uso:  analizar_cbfi.py --cartera "Detalle Portafolio.xlsx"\n')
+        return
+    ruta_cartera = argv[idx + 1]
+
+    try:
+        cartera = cartera_gbm.leer_cartera(ruta_cartera)
+    except ImportError:
+        print("\n  Falta openpyxl: pip install openpyxl\n")
+        return
+    except Exception as e:
+        print(f"\n  No se pudo leer '{ruta_cartera}': {type(e).__name__}: {e}\n")
+        return
+
+    if not cartera.posiciones:
+        print(f"\n  '{ruta_cartera}' no trajo posiciones reconocibles.")
+        print("  Revisa que sea el Excel de 'Detalle de Portafolio' de GBM.\n")
+        return
+
+    tickers = [p.ticker for p in cartera.posiciones if p.titulos]
+    desconocidos = [t for t in tickers if t not in CATALOGO]
+    if desconocidos:
+        print(f"\n  Aviso: fuera del catalogo de FIBRAs de la BMV, sin analisis: "
+              f"{', '.join(desconocidos)}")
+    analizables = [t for t in tickers if t in CATALOGO]
+
+    fundamentales = cargar_fundamentales()
+
+    fibrasmx_key = os.environ.get("FIBRASMX_API_KEY")
+    fibrasmx_con = conectar_historico() if (not sin_red and fibrasmx_key) else None
+    fibrasmx_aviso_impreso = False
+
+    fibras = []
+    for i, ticker in enumerate(analizables, 1):
+        datos = fundamentales.get(ticker, {})
+        fibra = FIBRA(ticker=ticker,
+                      **{k: datos.get(k) for k in CAMPOS_JSON if datos.get(k) is not None})
+
+        if fibrasmx_con is not None:
+            cacheado = None if refrescar_fibrasmx else _historico_de_hoy(fibrasmx_con, ticker)
+            if cacheado is not None:
+                fibra.completar_con_fibrasmx(cacheado)
+            else:
+                dfx = descargar_fibrasmx(ticker, fibrasmx_key)
+                if dfx.error:
+                    if not fibrasmx_aviso_impreso:
+                        print(f"\n  FibrasMX: {dfx.error}\n")
+                        fibrasmx_aviso_impreso = True
+                else:
+                    fibra.completar_con_fibrasmx(dfx)
+                    _guardar_historico(fibrasmx_con, ticker, dfx)
+
+        if not sin_red:
+            print(f"  [{i}/{len(analizables)}] {ticker}...".ljust(50), end="\r")
+            mercado = descargar(ticker)
+            fibra.mercado = mercado
+            if mercado.ok:
+                fibra.completar_con(mercado)
+
+        fibras.append(fibra)
+
+    if not sin_red:
+        print(" " * 50, end="\r")
+    if fibrasmx_con is not None:
+        fibrasmx_con.close()
+
+    pm = cartera.plusvalia_total
+    print(f"\n  Cartera: {len(cartera.posiciones)} posiciones, "
+          f"valor total ${cartera.valor_total:,.2f}, "
+          f"P/M acumulada {'-$' + f'{abs(pm):,.2f}' if pm < 0 else '$' + f'{pm:,.2f}'}")
+
+    try:
+        import reporte_cartera
+        ruta_pdf = reporte_cartera.generar(cartera, fibras)
+        print(f"\n  PDF de cartera generado: {ruta_pdf}\n")
+    except ImportError:
+        print("\n  Sin PDF: falta reportlab (pip install reportlab)\n")
+    except Exception as e:
+        print(f"\n  No se pudo generar el PDF de cartera: {type(e).__name__}: {e}\n")
+
+
 def main():
     args = [a for a in sys.argv[1:]]
     sin_red = "--sin-red" in args
+    refrescar_fibrasmx = "--refrescar" in args
     args = [a for a in args if not a.startswith("--")]
 
     print("\n" + "=" * 72)
@@ -1121,6 +1273,10 @@ def main():
             diagnostico(ticker.upper())
         return
 
+    if "--cartera" in sys.argv[1:]:
+        analizar_cartera(sys.argv[1:], sin_red, refrescar_fibrasmx)
+        return
+
     fundamentales = cargar_fundamentales()
 
     tickers = [t.upper() for t in args] or list(fundamentales.keys())
@@ -1138,6 +1294,8 @@ def main():
 
     fibrasmx_key = os.environ.get("FIBRASMX_API_KEY")
     fibrasmx_aviso_impreso = False
+    fibrasmx_con = conectar_historico() if (not sin_red and fibrasmx_key) else None
+    fibrasmx_de_cache = fibrasmx_de_red = 0
 
     fibras = []
     for i, ticker in enumerate(tickers, 1):
@@ -1145,14 +1303,21 @@ def main():
         fibra = FIBRA(ticker=ticker,
                       **{k: datos.get(k) for k in CAMPOS_JSON if datos.get(k) is not None})
 
-        if not sin_red and fibrasmx_key:
-            dfx = descargar_fibrasmx(ticker, fibrasmx_key)
-            if dfx.error:
-                if not fibrasmx_aviso_impreso:
-                    print(f"\n  FibrasMX: {dfx.error}\n")
-                    fibrasmx_aviso_impreso = True
+        if fibrasmx_con is not None:
+            cacheado = None if refrescar_fibrasmx else _historico_de_hoy(fibrasmx_con, ticker)
+            if cacheado is not None:
+                fibra.completar_con_fibrasmx(cacheado)
+                fibrasmx_de_cache += 1
             else:
-                fibra.completar_con_fibrasmx(dfx)
+                dfx = descargar_fibrasmx(ticker, fibrasmx_key)
+                if dfx.error:
+                    if not fibrasmx_aviso_impreso:
+                        print(f"\n  FibrasMX: {dfx.error}\n")
+                        fibrasmx_aviso_impreso = True
+                else:
+                    fibra.completar_con_fibrasmx(dfx)
+                    _guardar_historico(fibrasmx_con, ticker, dfx)
+                    fibrasmx_de_red += 1
 
         if not sin_red:
             print(f"  [{i}/{len(tickers)}] {ticker}...".ljust(50), end="\r")
@@ -1165,6 +1330,12 @@ def main():
 
     if not sin_red:
         print(" " * 50, end="\r")
+
+    if fibrasmx_con is not None:
+        fibrasmx_con.close()
+        if fibrasmx_de_cache:
+            print(f"  FibrasMX: {fibrasmx_de_cache} de cache de hoy, "
+                  f"{fibrasmx_de_red} recien consultadas.")
 
     # Con muchas FIBRAs el detalle son cientos de lineas y la tabla es lo que
     # se lee. El detalle sigue disponible por ticker o con --detalle.
